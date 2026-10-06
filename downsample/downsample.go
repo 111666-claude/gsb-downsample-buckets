@@ -20,25 +20,75 @@ type Bucket struct {
 	Count int
 }
 
+// bucketStart 把时间戳向下取整到宽度的整数倍（对负数同样成立）。
+func bucketStart(ts, width int) int {
+	q := ts / width
+	if r := ts % width; r < 0 {
+		q--
+	}
+	return q * width
+}
+
 // Downsample 把样本降采样成桶。
 func Downsample(samples []Sample, width, maxLateness int, c *Counter) []Bucket {
-	out := []Bucket{}
+	if len(samples) == 0 || width <= 0 {
+		return []Bucket{}
+	}
+
+	seen := make(map[string]bool)
+	sums := make(map[int]int)
+	counts := make(map[int]int)
+
+	haveWatermark := false
+	watermark := 0
+	haveRange := false
+	minStart, maxStart := 0, 0
+
 	for _, s := range samples {
-		c.Scanned++
-		idx := -1
-		for i := range out {
+		if c != nil {
 			c.Scanned++
-			if out[i].Start == s.TS {
-				idx = i
-				break
-			}
 		}
-		if idx < 0 {
-			out = append(out, Bucket{Start: s.TS})
-			idx = len(out) - 1
+
+		// 去重：同一样本 ID 只计第一次出现。
+		if seen[s.ID] {
+			continue
 		}
-		out[idx].Sum += s.Value
-		out[idx].Count++
+		seen[s.ID] = true
+
+		// 迟到：比已见到的最大时间戳早超过迟到窗口的样本丢弃。
+		if haveWatermark && s.TS < watermark-maxLateness {
+			continue
+		}
+		if !haveWatermark || s.TS > watermark {
+			watermark = s.TS
+		}
+		haveWatermark = true
+
+		start := bucketStart(s.TS, width)
+		if !haveRange {
+			minStart, maxStart = start, start
+			haveRange = true
+		} else if start < minStart {
+			minStart = start
+		} else if start > maxStart {
+			maxStart = start
+		}
+		sums[start] += s.Value
+		counts[start]++
+	}
+
+	if !haveRange {
+		return []Bucket{}
+	}
+
+	// 补缺口：按起点升序输出，空桶求和与条数为零。
+	out := []Bucket{}
+	for start := minStart; start <= maxStart; start += width {
+		out = append(out, Bucket{
+			Start: start,
+			Sum:   sums[start],
+			Count: counts[start],
+		})
 	}
 	return out
 }
